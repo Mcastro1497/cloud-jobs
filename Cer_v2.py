@@ -87,17 +87,17 @@ def minus_n_business_days(local_date: pd.Timestamp, n: int, holidays: Set[dtdate
     return d
 
 def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set[dtdate]) -> Tuple[datetime, pd.Timestamp, datetime]:
-    """(cutoff_utc, t1_local_date, valuation_utc=T+1 EOD local en UTC)"""
     today_local = now_utc.astimezone(LOCAL_TZ).date()
     t1_local_date = next_business_day(pd.Timestamp(today_local), holidays).date()
-    t1_local_eod = datetime.combine(t1_local_date, dtime(23, 59, 59, 999000), tzinfo=LOCAL_TZ)
-    return t1_local_eod.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_eod.astimezone(timezone.utc)
+    # Cambiar de 23:59:59 a 00:00:00 para alinear con Excel/Google
+    t1_local_start = datetime.combine(t1_local_date, dtime(0, 0, 0, 0), tzinfo=LOCAL_TZ)
+    return t1_local_start.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_start.astimezone(timezone.utc)
 
 # ===== Finanzas =====
 def _yearfrac_365(d0: datetime, d1: datetime) -> float:
-    if d0.tzinfo is None: d0 = d0.replace(tzinfo=timezone.utc)
-    if d1.tzinfo is None: d1 = d1.replace(tzinfo=timezone.utc)
-    return (d1 - d0).total_seconds() / (365.0 * 24 * 3600)
+    d0 = d0.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    d1 = d1.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (d1 - d0).days / 365.0
 
 def _xirr_f_and_df(rate: float, cashflows: List[Tuple[datetime, float]]):
     d0 = cashflows[0][0]

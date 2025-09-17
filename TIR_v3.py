@@ -10,7 +10,7 @@ Calcula TIR (XIRR) y Duration de Macaulay cada INTERVAL_SEC.
 
 import os, time
 from math import isfinite
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timezone, time as dtime, date as dtdate
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -53,8 +53,8 @@ IN_CHUNK_SIZE = int(os.getenv("IN_CHUNK_SIZE", "300"))
 sb = create_client(SUPABASE_URL, SERVICE_KEY)
 
 # ===== Calendario / hábiles =====
-def load_holidays_dates_from_supabase() -> Set:
-    hols: Set = set()
+def load_holidays_dates_from_supabase() -> Set[dtdate]:
+    hols: Set[dtdate] = set()
     try:
         rows = sb.table("holidays").select("holiday_date").execute().data or []
         for r in rows:
@@ -65,23 +65,37 @@ def load_holidays_dates_from_supabase() -> Set:
         print("[WARN] No se pudieron leer feriados de Supabase:", e)
     return hols
 
-def next_business_day(local_date: pd.Timestamp, holidays: Set) -> pd.Timestamp:
+def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Timestamp:
     d = local_date + pd.Timedelta(days=1)
     while d.weekday() >= 5 or d.date() in holidays:
         d += pd.Timedelta(days=1)
     return d
 
-def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set) -> datetime:
+def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set[dtdate]) -> Tuple[datetime, pd.Timestamp, datetime]:
     today_local = now_utc.astimezone(LOCAL_TZ).date()
     t1_local_date = next_business_day(pd.Timestamp(today_local), holidays).date()
-    t1_local_eod = datetime.combine(t1_local_date, dtime(23, 59, 59, 999000), tzinfo=LOCAL_TZ)
-    return t1_local_eod.astimezone(timezone.utc)
+    # Cambiar de 23:59:59 a 00:00:00 para alinear con Excel/Google
+    t1_local_start = datetime.combine(t1_local_date, dtime(0, 0, 0, 0), tzinfo=LOCAL_TZ)
+    return t1_local_start.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_start.astimezone(timezone.utc)
 
 # ===== Finanzas =====
+def _to_dt_aware_utc(x):
+    if isinstance(x, tuple):  # tolera valores tipo (dt,)
+        x = x[0]
+    if isinstance(x, pd.Timestamp):
+        x = x.to_pydatetime()
+    if isinstance(x, datetime):
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=timezone.utc)
+        return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # último recurso: parsear strings/otros
+    x = pd.to_datetime(x, utc=True).to_pydatetime()
+    return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
 def _yearfrac_365(d0: datetime, d1: datetime) -> float:
-    if d0.tzinfo is None: d0 = d0.replace(tzinfo=timezone.utc)
-    if d1.tzinfo is None: d1 = d1.replace(tzinfo=timezone.utc)
-    return (d1 - d0).total_seconds() / (365.0 * 24 * 3600)
+    d0 = _to_dt_aware_utc(d0)
+    d1 = _to_dt_aware_utc(d1)
+    return (d1 - d0).days / 365.0
 
 def _xirr_f_and_df(rate: float, cashflows: List[Tuple[datetime, float]]):
     d0 = cashflows[0][0]
@@ -262,7 +276,7 @@ def once() -> int:
 
     # 1) Hábiles y cutoff
     holidays = load_holidays_dates_from_supabase()
-    cutoff_utc = t1_eod_cutoff_utc(now_utc, holidays)
+    cutoff_utc, t1_local_date, valuation_utc = t1_eod_cutoff_utc(now_utc, holidays)
     print(f"[INFO] Cutoff (T+1 hábil, fin de día local) = {cutoff_utc.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     # 2) Tickers + tipo
@@ -270,7 +284,7 @@ def once() -> int:
     if not base_tickers:
         print("[WARN] all_tickers vacío o no accesible."); return 0
 
-    on_tickers = [t for t in base_tickers if type_map.get(t) == "ON" or type_map.get(t) == "UNKNOWN"]
+    on_tickers = [t for t in base_tickers if type_map.get(t) in {"ON","UNKNOWN"}]
     hd_tickers = [t for t in base_tickers if type_map.get(t) == "HD"]
 
     # 3) Flujos por tabla
@@ -318,11 +332,12 @@ def once() -> int:
                .agg(total=("total","sum"))
                .sort_values("fecha_pago"))
 
-        cf_series = [(now_utc, -float(price))]
+        # t0 = valuation_utc (T+1 EOD local en UTC)
+        cf_series = [(valuation_utc, -float(price))]
         for _, row in g.iterrows():
-            dt = row["fecha_pago"].to_pydatetime()
+            dtp = row["fecha_pago"].to_pydatetime()
             amt = float(row["total"])
-            if amt != 0.0: cf_series.append((dt, amt))
+            if amt != 0.0: cf_series.append((dtp, amt))
         if len(cf_series) < 2: continue
 
         r = xirr_excel_style(cf_series, guess=0.10)
@@ -333,12 +348,12 @@ def once() -> int:
                 print(f"[DEBUG] {tk} sin raíz | {src}={price:.6f} | cf_sum={sum(a for _, a in cf_series[1:]):.6f}")
             continue
 
-        # Duration (Macaulay)
+        # Duration (Macaulay) con t0 = valuation_utc
         cfs_pos = []
         for _, row in g.iterrows():
-            dt = row["fecha_pago"].to_pydatetime()
+            dtp = row["fecha_pago"].to_pydatetime()
             amt = float(row["total"])
-            t = _yearfrac_365(now_utc, dt)
+            t = _yearfrac_365(valuation_utc, dtp)
             cfs_pos.append((t, amt))
         duration_y = macaulay_duration(cfs_pos, r)
 
