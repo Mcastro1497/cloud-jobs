@@ -1,0 +1,34 @@
+name: CER + TIR daily
+
+on:
+  schedule:
+    - cron: '30 13 * * *'   # 10:30 Argentina (UTC-3)
+  workflow_dispatch: {}
+  # Si querés que también corra en cada push a main, descomenta:
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Run CER + TIR
+        env:
+          TZ: America/Argentina/Cordoba
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          ECO_USER: ${{ secrets.ECO_USER }}
+          ECO_PASS: ${{ secrets.ECO_PASS }}
+          ECO_ACCT: ${{ secrets.ECO_ACCT }}
+          DEFAULT_SEG: ${{ secrets.DEFAULT_SEG }}
+          PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
+        run: python -m src run-all
