@@ -1,0 +1,47 @@
+name: WS guard morning (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Duración en minutos"
+        required: true
+        default: "10"
+
+concurrency:
+  group: ws-guard-morning-manual
+  cancel-in-progress: true
+
+jobs:
+  run-ws-morning-manual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+      - name: Run ws-guard (manual morning)
+        shell: bash
+        env:
+          TZ: America/Argentina/Cordoba
+          START_HHMM: "00:00"
+          STOP_HHMM:  "23:59"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          ECO_USER: ${{ secrets.ECO_USER }}
+          ECO_PASS: ${{ secrets.ECO_PASS }}
+          ECO_ACCT: ${{ secrets.ECO_ACCT }}
+          DEFAULT_SEG: ${{ secrets.DEFAULT_SEG }}
+          PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
+        run: |
+          set -e
+          SECS=$(( ${{ github.event.inputs.minutes }} * 60 ))
+          timeout ${SECS}s python -m src ws-guard || code=$?
+          if [[ "${code:-0}" -eq 124 ]]; then
+            echo "Finalizó por timeout esperado (${SECS}s). OK."
+            exit 0
+          else
+            exit "${code:-0}"
+          fi
