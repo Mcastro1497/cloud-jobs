@@ -1,0 +1,45 @@
+name: WS guard (13:30–18:00 ART)
+
+on:
+  schedule:
+    - cron: '30 16 * * *'   # 13:30 Argentina (UTC=16:30)
+  workflow_dispatch: {}
+
+concurrency:
+  group: ws-guard-afternoon
+  cancel-in-progress: true
+
+jobs:
+  run-ws-afternoon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Run ws-guard (afternoon)
+        shell: bash
+        env:
+          TZ: America/Argentina/Cordoba
+          START_HHMM: "13:30"
+          STOP_HHMM:  "18:00"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          ECO_USER: ${{ secrets.ECO_USER }}
+          ECO_PASS: ${{ secrets.ECO_PASS }}
+          ECO_ACCT: ${{ secrets.ECO_ACCT }}
+          DEFAULT_SEG: ${{ secrets.DEFAULT_SEG }}
+          PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
+        run: |
+          set -e
+          timeout 16200s python -m src ws-guard || code=$?
+          if [[ "${code:-0}" -eq 124 ]]; then
+            echo "Finalizó por timeout esperado (4.5h). OK."
+            exit 0
+          else
+            exit "${code:-0}"
+          fi
