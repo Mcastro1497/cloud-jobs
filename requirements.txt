@@ -1,0 +1,10 @@
+python-dotenv
+supabase
+httpx
+pyRofex
+requests
+pandas
+numpy
+openpyxl      # si leés/escribís .xlsx
+pyarrow       # si guardás/abrís .parquet
+
