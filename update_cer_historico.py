@@ -29,7 +29,7 @@ except Exception:
 from supabase import create_client, Client
 
 # ⬇️ Si preferís hardcodear el ID del CER, ponelo acá:
-CER_ID = None  # ej.: 999  (si lo dejás en None, usá --cer-id por CLI)
+CER_ID = 30  # ej.: 999  (si lo dejás en None, usá --cer-id por CLI)
 
 BASE = "https://api.bcra.gob.ar/estadisticas/v4.0"
 
