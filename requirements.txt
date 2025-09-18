@@ -7,4 +7,4 @@ pandas
 numpy
 openpyxl      # si leés/escribís .xlsx
 pyarrow       # si guardás/abrís .parquet
-
+certifi
