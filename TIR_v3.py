@@ -1,14 +1,5 @@
+# on_hd_ytm_duration.py (one-line-per-cycle)
 # -*- coding: utf-8 -*-
-"""
-Calcula TIR (XIRR) y Duration de Macaulay cada INTERVAL_SEC.
-- Lee tickers y tipo desde public.all_tickers.
-- ON: usa flujos de public.ons_flows y precio last_prices.price_usd.
-- HD: usa flujos de public.soberanos_flows y precio last_prices.last (ya en USD).
-- Filtra flujos por fecha_pago > (T+1 hábil, fin de día LOCAL), ignorando moneda_pago.
-- Upsert en last_prices: ytm (decimal anual), duration_y (años), ts.
-
-Salida: SOLO imprime líneas cuando actualiza un ticker, con timestamp local.
-"""
 
 import os, time
 from math import isfinite
@@ -19,7 +10,7 @@ import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
 
-# ===== Zona horaria y logging =====
+# ===== Zona horaria =====
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -38,11 +29,6 @@ LOCAL_TZ = _get_local_tz()
 def _now_local_str() -> str:
     return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-VERBOSE = (os.getenv("VERBOSE", "0").strip() == "1")
-def vlog(*args, **kwargs):
-    if VERBOSE:
-        print(f"[{_now_local_str()}]", *args, **kwargs)
-
 # ===== Config =====
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://yqllthcnlioujctfcseh.supabase.co")
@@ -51,17 +37,15 @@ INTERVAL_SEC = float(os.getenv("INTERVAL_SEC", "60"))
 PAGE_SIZE    = int(os.getenv("PAGE_SIZE", "1000"))
 DEBUG_TICKER = (os.getenv("DEBUG_TICKER") or "").strip().upper() or None
 
-# Nombres de tablas
 ONS_FLOWS_TABLE       = os.getenv("ONS_FLOWS_TABLE", "ons_flows")
 SOBERANOS_FLOWS_TABLE = os.getenv("SOBERANOS_FLOWS_TABLE", "soberanos_flows")
 
-# Paginación y filtros
 FILTER_FLOWS_BY_ALL_TICKERS = (os.getenv("FILTER_FLOWS_BY_ALL_TICKERS", "true").lower() == "true")
 IN_CHUNK_SIZE = int(os.getenv("IN_CHUNK_SIZE", "300"))
 
 sb = create_client(SUPABASE_URL, SERVICE_KEY)
 
-# ===== Calendario / hábiles =====
+# ===== Calendario =====
 def load_holidays_dates_from_supabase() -> Set[dtdate]:
     hols: Set[dtdate] = set()
     try:
@@ -70,8 +54,8 @@ def load_holidays_dates_from_supabase() -> Set[dtdate]:
             dt = pd.to_datetime(r.get("holiday_date"), errors="coerce")
             if pd.notna(dt):
                 hols.add(dt.date())
-    except Exception as e:
-        vlog("[WARN] No se pudieron leer feriados de Supabase:", e)
+    except Exception:
+        pass
     return hols
 
 def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Timestamp:
@@ -83,26 +67,21 @@ def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Tim
 def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set[dtdate]) -> Tuple[datetime, pd.Timestamp, datetime]:
     today_local = now_utc.astimezone(LOCAL_TZ).date()
     t1_local_date = next_business_day(pd.Timestamp(today_local), holidays).date()
-    # Valuación 00:00:00 del T+1 local
     t1_local_start = datetime.combine(t1_local_date, dtime(0, 0, 0, 0), tzinfo=LOCAL_TZ)
     return t1_local_start.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_start.astimezone(timezone.utc)
 
 # ===== Finanzas =====
 def _to_dt_aware_utc(x):
-    if isinstance(x, tuple):
-        x = x[0]
-    if isinstance(x, pd.Timestamp):
-        x = x.to_pydatetime()
+    if isinstance(x, tuple): x = x[0]
+    if isinstance(x, pd.Timestamp): x = x.to_pydatetime()
     if isinstance(x, datetime):
-        if x.tzinfo is None:
-            x = x.replace(tzinfo=timezone.utc)
+        if x.tzinfo is None: x = x.replace(tzinfo=timezone.utc)
         return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     x = pd.to_datetime(x, utc=True).to_pydatetime()
     return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
 def _yearfrac_365(d0: datetime, d1: datetime) -> float:
-    d0 = _to_dt_aware_utc(d0)
-    d1 = _to_dt_aware_utc(d1)
+    d0 = _to_dt_aware_utc(d0); d1 = _to_dt_aware_utc(d1)
     return (d1 - d0).days / 365.0
 
 def _xirr_f_and_df(rate: float, cashflows: List[Tuple[datetime, float]]):
@@ -128,9 +107,9 @@ def xirr_excel_style(cashflows: List[Tuple[datetime, float]], guess: float = 0.1
         if abs(r_next - r) < 1e-12: return r_next
         r = r_next
     def fval(x): return _xirr_f_and_df(x, cashflows)[0]
-    grid = [-0.9, -0.5, -0.1, 0.0, 0.02, 0.05, 0.08, 0.10, 0.15, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+    grid = [-0.9,-0.5,-0.1,0.0,0.02,0.05,0.08,0.10,0.15,0.25,0.5,1.0,2.0,5.0,10.0]
     a = b = None
-    last_x, last_y = None, None
+    last_x = last_y = None
     for x in grid:
         y = fval(x)
         if last_x is not None and pd.notna(last_y) and pd.notna(y) and last_y * y <= 0:
@@ -203,14 +182,12 @@ def _normalize_flows_df(df: pd.DataFrame) -> pd.DataFrame:
                     .replace({"": "0", "None": "0"})
                     .astype(float)
     )
-    if "moneda_pago" in df.columns:
-        df["moneda_pago"] = df["moneda_pago"].astype(str).str.strip()
     return df
 
 def fetch_future_flows_from_table(table_name: str, cutoff_utc: datetime,
                                   tickers_filter: Optional[List[str]] = None) -> pd.DataFrame:
     cols = "ticker, fecha_pago, total, moneda_pago"
-    if tickers_filter and len(tickers_filter) > 0 and FILTER_FLOWS_BY_ALL_TICKERS:
+    if tickers_filter and len(tickers_filter) > 0 and (os.getenv("FILTER_FLOWS_BY_ALL_TICKERS","true").lower()=="true"):
         frames = []
         for chunk in _chunks(tickers_filter, IN_CHUNK_SIZE):
             start = 0
@@ -244,11 +221,6 @@ def fetch_future_flows_from_table(table_name: str, cutoff_utc: datetime,
         return _normalize_flows_df(df).sort_values(["ticker","fecha_pago"]).reset_index(drop=True)
 
 def load_last_prices() -> Tuple[Dict[str, float], Dict[str, float]]:
-    """
-    Retorna (price_usd_map, last_map) desde last_prices.
-    - ON usa price_usd
-    - HD usa last (USD)
-    """
     price_usd_map: Dict[str, float] = {}
     last_map: Dict[str, float] = {}
     try:
@@ -280,71 +252,52 @@ def upsert_metrics(ticker: str, ytm: float, duration_y: Optional[float]):
 # ===== Ciclo principal =====
 def once() -> int:
     now_utc = datetime.now(timezone.utc)
-
-    # 1) Hábiles y cutoff
     holidays = load_holidays_dates_from_supabase()
     cutoff_utc, t1_local_date, valuation_utc = t1_eod_cutoff_utc(now_utc, holidays)
-    vlog(f"Cutoff (T+1 hábil) = {cutoff_utc.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-    # 2) Tickers + tipo
     base_tickers, type_map = load_all_tickers_with_type()
     if not base_tickers:
-        vlog("all_tickers vacío o no accesible.")
         return 0
 
     on_tickers = [t for t in base_tickers if type_map.get(t) in {"ON","UNKNOWN"}]
     hd_tickers = [t for t in base_tickers if type_map.get(t) == "HD"]
 
-    # 3) Flujos por tabla
     flows_on = fetch_future_flows_from_table(ONS_FLOWS_TABLE, cutoff_utc, on_tickers)
     flows_hd = fetch_future_flows_from_table(SOBERANOS_FLOWS_TABLE, cutoff_utc, hd_tickers)
-
-    # 4) Precios
     price_usd_map, last_map = load_last_prices()
 
-    # 5) Unimos flujos
     flows = pd.concat([flows_on, flows_hd], ignore_index=True) if (not flows_on.empty or not flows_hd.empty) else pd.DataFrame(columns=["ticker","fecha_pago","total","moneda_pago"])
     if flows.empty or not (price_usd_map or last_map):
         return 0
 
-    flows_tickers = set(flows["ticker"].unique())
-    candidates    = sorted(set(base_tickers) & flows_tickers)
+    candidates = sorted(set(base_tickers) & set(flows["ticker"].unique()))
     if not candidates:
         return 0
 
     updated = 0
     for tk in candidates:
         instr_type = type_map.get(tk, "UNKNOWN")
-        # Precio según tipo (USD)
-        if instr_type == "HD":
-            price = last_map.get(tk); src = "last(USD)"
-        else:
-            price = price_usd_map.get(tk); src = "price_usd"
+        price = last_map.get(tk) if instr_type == "HD" else price_usd_map.get(tk)
         if price is None or price <= 0:
             continue
 
-        g = flows.loc[flows["ticker"] == tk, ["fecha_pago","total"]].copy()
-        g = (g.groupby("fecha_pago", as_index=False, sort=True)
-               .agg(total=("total","sum"))
-               .sort_values("fecha_pago"))
+        g = (flows.loc[flows["ticker"] == tk, ["fecha_pago","total"]]
+                 .groupby("fecha_pago", as_index=False, sort=True)
+                 .agg(total=("total","sum"))
+                 .sort_values("fecha_pago"))
 
-        # t0 = valuation_utc (T+1 EOD local en UTC)
         cf_series = [(valuation_utc, -float(price))]
         for _, row in g.iterrows():
             dtp = row["fecha_pago"].to_pydatetime()
             amt = float(row["total"])
-            if amt != 0.0:
-                cf_series.append((dtp, amt))
+            if amt != 0.0: cf_series.append((dtp, amt))
         if len(cf_series) < 2:
             continue
 
         r = xirr_excel_style(cf_series, guess=0.10)
         if r is None or not isfinite(r):
-            if DEBUG_TICKER and tk == DEBUG_TICKER:
-                vlog(f"[DEBUG] {tk} sin raíz | {src}={price:.6f}")
             continue
 
-        # Duration (Macaulay) con t0 = valuation_utc
         cfs_pos = []
         for _, row in g.iterrows():
             dtp = row["fecha_pago"].to_pydatetime()
@@ -356,16 +309,14 @@ def once() -> int:
         upsert_metrics(tk, float(r), None if duration_y is None else float(duration_y))
         updated += 1
 
-        # === ÚNICO PRINT por ticker actualizado ===
-        dur_txt = "None" if duration_y is None else f"{duration_y:.4f}"
-        print(f"[{_now_local_str()}] UPDATED {tk:8s} ({instr_type})  XIRR={r:.6%}  duration_y={dur_txt}")
-
     return updated
 
 def main():
     while True:
         try:
-            _ = once()   # ya imprime solo cuando actualiza
+            n = once()
+            if n > 0:
+                print(f"[{_now_local_str()}] UPDATED {n} tickers")
         except Exception as e:
             print(f"[{_now_local_str()}] [ERROR]", e)
         time.sleep(INTERVAL_SEC)
