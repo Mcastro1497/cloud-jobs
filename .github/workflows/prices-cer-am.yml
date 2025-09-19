@@ -1,0 +1,86 @@
+name: Prices → CER+TIR (AM, 10:30–13:30 AR)
+
+on:
+  schedule:
+    # 10:30 AR = 13:30 UTC
+    - cron: "30 13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prices-cer-am
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 190   # 3h + margen
+    env:
+      LOCAL_TZ: America/Argentina/Cordoba
+      # ——— Secrets / config de tus scripts ———
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
+      ECO_USER:     ${{ secrets.ECO_USER }}
+      ECO_PASS:     ${{ secrets.ECO_PASS }}
+      ECO_ACCT:     ${{ secrets.ECO_ACCT }}
+      DEFAULT_SEGMENT: 24hs
+      PUSH_INTERVAL_SEC: "10"
+
+      # Silencio por defecto
+      PRINT_UPDATES: "0"
+      VERBOSE: "0"
+
+      # TTL para Precios (segundos que dejamos correr antes de terminarlo)
+      PRICES_TTL_SEC: "8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+
+      - name: Loop min a min (3 horas)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOTAL_MINUTES=180 # 3h
+          PRICES_TTL="${PRICES_TTL_SEC:-8}"
+          for ((i=1; i<=TOTAL_MINUTES; i++)); do
+            LOOP_START=$(date +%s)
+            echo "[AM][$(date -u '+%F %T UTC')] cycle=$i"
+
+            # 1) Precios por TTL y terminar
+            python Precios_v4.py & PR_PID=$!
+            sleep "$PRICES_TTL" || true
+            kill $PR_PID 2>/dev/null || true
+
+            # 2) CER y 3) TIR — ejecutar once() de cada uno
+            python - <<'PY'
+import importlib.util, sys
+def run_once(path):
+    spec = importlib.util.spec_from_file_location("modx", path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    fn = getattr(mod, "once", None)
+    if callable(fn):
+        n = fn()
+        print(f"[RUN] {path} once() -> {n}")
+    else:
+        print(f"[WARN] {path} no define once()")
+run_once("Cer_v2.py")
+run_once("TIR_v3.py")
+PY
+
+            # Dormir lo necesario para completar 60s
+            ELAPSED=$(( $(date +%s) - LOOP_START ))
+            REM=$(( 60 - ELAPSED ))
+            if [ $REM -gt 0 ]; then sleep $REM; fi
+          done
