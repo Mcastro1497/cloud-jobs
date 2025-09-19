@@ -10,8 +10,6 @@ Calcula TIR (XIRR), Duration (Macaulay) y TNA (solo Fija cupón 0) para soberano
             - CER_t10: cer_historico.valor_cer en fecha = (T+1 hábil) - 10 días hábiles
 - Fecha de valuación para TIR/Duration/TNA: T+1 hábil fin de día local
 - Upsert en last_prices: ytm (decimal anual), duration_y (años), tna (decimal anual), ts
-
-Salida: SOLO imprime 1 línea por ciclo si hubo actualizaciones (timestamp local).
 """
 
 import os, time
@@ -39,8 +37,6 @@ def _get_local_tz():
     return timezone.utc
 
 LOCAL_TZ = _get_local_tz()
-def _now_local_str() -> str:
-    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ===== Config =====
 load_dotenv()
@@ -49,7 +45,6 @@ SERVICE_KEY  = os.getenv("SERVICE_KEY",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e
 INTERVAL_SEC = float(os.getenv("INTERVAL_SEC", "60"))
 PAGE_SIZE    = int(os.getenv("PAGE_SIZE", "1000"))
 DEBUG_TICKER = (os.getenv("DEBUG_TICKER") or "").strip().upper() or None
-VERBOSE      = (os.getenv("VERBOSE", "0").strip() == "1")  # logs extra opcionales
 
 # Tablas
 FLOWS_TABLE    = os.getenv("SOBERANOS_ARS_FLOWS_TABLE", "soberonos_ars_flows").replace("soberonos", "soberanos")  # safe fix
@@ -70,8 +65,7 @@ def load_holidays_dates_from_supabase() -> Set[dtdate]:
             if pd.notna(dt):
                 hols.add(dt.date())
     except Exception as e:
-        if VERBOSE:
-            print(f"[{_now_local_str()}] [WARN] No se pudieron leer feriados de Supabase:", e)
+        print("[WARN] No se pudieron leer feriados de Supabase:", e)
     return hols
 
 def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Timestamp:
@@ -95,7 +89,7 @@ def minus_n_business_days(local_date: pd.Timestamp, n: int, holidays: Set[dtdate
 def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set[dtdate]) -> Tuple[datetime, pd.Timestamp, datetime]:
     today_local = now_utc.astimezone(LOCAL_TZ).date()
     t1_local_date = next_business_day(pd.Timestamp(today_local), holidays).date()
-    # Valuación en 00:00 del T+1 local
+    # Cambiar de 23:59:59 a 00:00:00 para alinear con Excel/Google
     t1_local_start = datetime.combine(t1_local_date, dtime(0, 0, 0, 0), tzinfo=LOCAL_TZ)
     return t1_local_start.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_start.astimezone(timezone.utc)
 
@@ -241,8 +235,7 @@ def load_cer_value_for_date(d: pd.Timestamp) -> Optional[float]:
             v = float(rows[0].get("valor_cer"))
             return v if v > 0 else None
     except Exception as e:
-        if VERBOSE:
-            print(f"[{_now_local_str()}] [WARN] No se pudo leer CER para {d}: {e}")
+        print("[WARN] No se pudo leer CER para", d, ":", e)
     return None
 
 def upsert_metrics(ticker: str, ytm: float, duration_y: Optional[float], tna: Optional[float]):
@@ -263,10 +256,13 @@ def once() -> int:
     cutoff_utc, t1_local_date, valuation_utc = t1_eod_cutoff_utc(now_utc, holidays)
     cer_tminus10_date = minus_n_business_days(t1_local_date, 10, holidays)
 
+    print(f"[INFO] Cutoff (T+1 hábil, fin de día local) = {cutoff_utc.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"[INFO] Fecha CER t-10 hábiles = {cer_tminus10_date.strftime('%Y-%m-%d')} (respecto T+1={t1_local_date.strftime('%Y-%m-%d')})")
+
     # 2) Flujos
     flows = fetch_future_flows(cutoff_utc)
     if flows.empty:
-        return 0
+        print("[WARN] sin flujos futuros en soberanos_ars_flows."); return 0
 
     # 3) Tipo por ticker (prioriza CER si hay mezcla)
     tipo_by_ticker: Dict[str, str] = {}
@@ -284,33 +280,40 @@ def once() -> int:
     # 4) Precios
     last_map = load_last_prices_last_map()
     if not last_map:
-        return 0
+        print("[WARN] last_prices vacío (sin 'last')."); return 0
 
     # 5) Datos para CER
     cer_tickers = [tk for tk in tickers if tipo_by_ticker.get(tk) == "CER"]
     cer_emision_map = load_cer_emision_map(cer_tickers) if cer_tickers else {}
     cer_t10_value = load_cer_value_for_date(cer_tminus10_date) if cer_tickers else None
+    if cer_tickers and (cer_t10_value is None):
+        print("[WARN] No se pudo determinar CER(t-10). Se omitirán los CER hasta contar con el valor.")
 
+    # 6) Loop
     updated = 0
+    skipped = []
+    issues = []
 
     for tk, g in flows.groupby("ticker", sort=True):
         instr_type = tipo_by_ticker.get(tk, "Fija")
         base_last = last_map.get(tk)
 
         if base_last is None or base_last <= 0:
-            continue
+            skipped.append((tk, instr_type, "sin last")); continue
 
         # Precio efectivo
         if instr_type.upper() == "CER":
             cer_em = cer_emision_map.get(tk)
             if cer_em is None or cer_em <= 0 or cer_t10_value is None or cer_t10_value <= 0:
-                continue
+                skipped.append((tk, "CER", "sin cer_emision o sin CER(t-10)")); continue
             coef = cer_t10_value / cer_em
             if coef <= 0:
-                continue
+                skipped.append((tk, "CER", f"coef inválido={coef:.6f}")); continue
             price = base_last / coef
+            price_src = f"last / (CER_t10/CER_emision) = {base_last:.6f} / ({cer_t10_value:.6f}/{cer_em:.6f})"
         else:
             price = base_last
+            price_src = "last"
 
         # Consolidar CFs por fecha
         gi = (g[["fecha_pago","total"]]
@@ -326,13 +329,15 @@ def once() -> int:
             if amt != 0.0:
                 cf_series.append((dtpay, amt))
         if len(cf_series) < 2:
-            continue
+            skipped.append((tk, instr_type, "sin CFs positivos")); continue
 
         # XIRR (TEA)
         r = xirr_excel_style(cf_series, guess=0.10)
         if r is None or not isfinite(r):
-            if VERBOSE and DEBUG_TICKER and tk == DEBUG_TICKER:
-                print(f"[{_now_local_str()}] [DEBUG] {tk} sin raíz")
+            issues.append((tk, price, price_src, sum(a for _, a in cf_series[1:]),
+                           [(d.strftime('%Y-%m-%d'), a) for d, a in cf_series[:6]]))
+            if DEBUG_TICKER and tk == DEBUG_TICKER:
+                print(f"[DEBUG] {tk} sin raíz | {price_src} | cf_sum={sum(a for _, a in cf_series[1:]):.6f}")
             continue
 
         # Duration (Macaulay)
@@ -344,14 +349,22 @@ def once() -> int:
             cfs_pos.append((t, amt))
         duration_y = macaulay_duration(cfs_pos, r)
 
-        # TNA (solo Fija cupón 0)
+        # TNA:
+        #   - CER: None
+        #   - Fija:
+        #       * si UN solo flujo positivo futuro => cupón 0:
+        #           TNA = ((pago_final/precio) - 1) * (365 / días) = ((payoff/price)-1) / t_years
+        #       * si más de uno => con cupones => TNA = None
         if instr_type.upper() == "FIJA":
             pos_rows = gi.loc[gi["total"].astype(float) != 0.0].copy()
             if len(pos_rows) == 1:
                 payoff = float(pos_rows.iloc[0]["total"])
                 dtpay  = pos_rows.iloc[0]["fecha_pago"].to_pydatetime()
                 t_years = _yearfrac_365(valuation_utc, dtpay)
-                tna_val = ((payoff / price) - 1.0) / t_years if (payoff > 0 and price > 0 and t_years > 0) else None
+                if payoff > 0 and price > 0 and t_years > 0:
+                    tna_val = ((payoff / price) - 1.0) / t_years
+                else:
+                    tna_val = None
             else:
                 tna_val = None
         else:
@@ -360,16 +373,32 @@ def once() -> int:
         upsert_metrics(tk, float(r), None if duration_y is None else float(duration_y), tna_val)
         updated += 1
 
+        if DEBUG_TICKER and tk == DEBUG_TICKER:
+            print(f"[DEBUG] {tk} ({instr_type}) price={price:,.6f} ({price_src})  XIRR={r:.6%}  Duration={duration_y}  TNA={tna_val}")
+        else:
+            dur_txt = None if duration_y is None else round(duration_y, 4)
+            tna_txt = None if tna_val is None else round(tna_val, 6)
+            reason = "" if (instr_type.upper() != "FIJA") else (f"  [{'cupón 0' if tna_val is not None else 'con cupones => sin TNA'}]")
+            print(f"[OK] {tk:8s} ({instr_type}) price={price:,.6f}  XIRR={r:.6%}  duration_y={dur_txt}  tna={tna_txt}{reason}")
+
+    if skipped:
+        sample = ", ".join([f"{tk}({t}:{why})" for tk,t,why in skipped[:10]])
+        print(f"[INFO] saltados ({len(skipped)}): {sample}")
+
+    if issues:
+        print("[INFO] casos sin raíz/convergencia (muestra máx 5):")
+        for tk, p, src, s, c in issues[:5]:
+            print(f"  - {tk}: price={p:.6f} src={src} sum_cf={s:.6f} cfs(muestra)={c}")
+
     return updated
 
 def main():
     while True:
         try:
             n = once()
-            if n > 0:
-                print(f"[{_now_local_str()}] UPDATED {n} tickers")
+            print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Tickers actualizados: {n}")
         except Exception as e:
-            print(f"[{_now_local_str()}] [ERROR]", e)
+            print("[ERROR]", e)
         time.sleep(INTERVAL_SEC)
 
 if __name__ == "__main__":
