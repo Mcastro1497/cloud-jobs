@@ -11,7 +11,7 @@ Calcula TIR (XIRR), Duration (Macaulay) y TNA (solo Fija cupón 0) para soberano
 - Fecha de valuación para TIR/Duration/TNA: T+1 hábil fin de día local
 - Upsert en last_prices: ytm (decimal anual), duration_y (años), tna (decimal anual), ts
 
-Salida: SOLO imprime líneas cuando actualiza un ticker, con timestamp local.
+Salida: SOLO imprime 1 línea por ciclo si hubo actualizaciones (timestamp local).
 """
 
 import os, time
@@ -49,7 +49,7 @@ SERVICE_KEY  = os.getenv("SERVICE_KEY",  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e
 INTERVAL_SEC = float(os.getenv("INTERVAL_SEC", "60"))
 PAGE_SIZE    = int(os.getenv("PAGE_SIZE", "1000"))
 DEBUG_TICKER = (os.getenv("DEBUG_TICKER") or "").strip().upper() or None
-VERBOSE      = (os.getenv("VERBOSE", "0").strip() == "1")  # si querés más logs, poné VERBOSE=1
+VERBOSE      = (os.getenv("VERBOSE", "0").strip() == "1")  # logs extra opcionales
 
 # Tablas
 FLOWS_TABLE    = os.getenv("SOBERANOS_ARS_FLOWS_TABLE", "soberonos_ars_flows").replace("soberonos", "soberanos")  # safe fix
@@ -344,7 +344,7 @@ def once() -> int:
             cfs_pos.append((t, amt))
         duration_y = macaulay_duration(cfs_pos, r)
 
-        # TNA
+        # TNA (solo Fija cupón 0)
         if instr_type.upper() == "FIJA":
             pos_rows = gi.loc[gi["total"].astype(float) != 0.0].copy()
             if len(pos_rows) == 1:
@@ -360,20 +360,15 @@ def once() -> int:
         upsert_metrics(tk, float(r), None if duration_y is None else float(duration_y), tna_val)
         updated += 1
 
-        # === ÚNICO PRINT por ticker actualizado ===
-        dur_txt = "None" if duration_y is None else f"{duration_y:.4f}"
-        tna_txt = "None" if tna_val is None else f"{tna_val:.6f}"
-        print(f"[{_now_local_str()}] UPDATED {tk} ({instr_type})  XIRR={r:.6%}  duration_y={dur_txt}  tna={tna_txt}")
-
     return updated
 
 def main():
     while True:
         try:
-            _ = once()
-            # No prints aquí: ya se imprimieron solo las líneas de actualizaciones
+            n = once()
+            if n > 0:
+                print(f"[{_now_local_str()}] UPDATED {n} tickers")
         except Exception as e:
-            # Solo mostramos errores para no perder diagnósticos críticos
             print(f"[{_now_local_str()}] [ERROR]", e)
         time.sleep(INTERVAL_SEC)
 
