@@ -1,7 +1,7 @@
 # ws_ingestor_last_prices_usd.py
 # -*- coding: utf-8 -*-
 
-import os, time, signal, threading
+import os, time, signal, threading, math
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
@@ -9,6 +9,31 @@ load_dotenv()
 import requests
 import pyRofex
 from supabase import create_client
+
+# ========= Zona horaria y utilidades de log =========
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+def _get_local_tz():
+    tzname = os.getenv("LOCAL_TZ", "America/Argentina/Cordoba")
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(tzname)
+        except Exception:
+            pass
+    return timezone.utc
+
+LOCAL_TZ = _get_local_tz()
+def _now_local_str() -> str:
+    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+VERBOSE = (os.getenv("VERBOSE", "0").strip() == "1")
+
+def vlog(*args, **kwargs):
+    if VERBOSE:
+        print(f"[{_now_local_str()}]", *args, **kwargs)
 
 # ========= Config =========
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://yqllthcnlioujctfcseh.supabase.co")
@@ -55,11 +80,11 @@ def init_connection_eco():
     r = requests.post(ECO_BASE + "/login",
                       json={"username": PRIMARY_USER, "password": PRIMARY_PASS},
                       timeout=8)
-    print("[DEBUG] ECO /login ->", r.status_code)
+    vlog("ECO /login ->", r.status_code)
     r.raise_for_status()
     pyRofex.initialize(user=PRIMARY_USER, password=PRIMARY_PASS,
                        account=PRIMARY_ACCT, environment=pyRofex.Environment.LIVE)
-    print(f"[OK] Conectado a ECO {ECO_BASE} (Environment.LIVE)")
+    vlog(f"Conectado a ECO {ECO_BASE} (Environment.LIVE)")
 
 # ========= Tickers desde public.all_tickers =========
 def get_all_tickers_from_all_tickers():
@@ -74,7 +99,7 @@ def get_all_tickers_from_all_tickers():
     uniques = set()
     seg_pref = {}
 
-    seg_keys = {"segment", "preferred_segment", "seg", "segmento"}  # normalizados
+    seg_keys = {"segment", "preferredsegment", "seg", "segmento"}  # normalizados
     for r in rows:
         sym = (r.get("symbol") or r.get("ticker") or "").strip().upper()
         if not sym:
@@ -104,9 +129,9 @@ def get_all_tickers_from_all_tickers():
     seg_pref.setdefault("AL30D", DEFAULT_SEG)
 
     syms = sorted(uniques)
-    print(f"[all_tickers] {len(rows)} filas leídas -> {len(syms)} tickers únicos (ONLY_ACTIVE={ONLY_ACTIVE})")
+    vlog(f"[all_tickers] {len(rows)} filas -> {len(syms)} tickers únicos (ONLY_ACTIVE={ONLY_ACTIVE})")
     if syms:
-        print("[all_tickers] muestra:", syms[:20], ("..." if len(syms)>20 else ""))
+        vlog("[all_tickers] muestra:", syms[:20], ("..." if len(syms)>20 else ""))
     return syms, seg_pref
 
 def fetch_merv_instruments_symbols():
@@ -117,7 +142,7 @@ def fetch_merv_instruments_symbols():
                                        market_segment=[pyRofex.MarketSegment.MERV])
         data = resp.get("instruments") or []
     except Exception:
-        print("[info] fallback get_all_instruments() y filtro 'MERV - '")
+        vlog("[info] fallback get_all_instruments() y filtro 'MERV - '")
         data = (pyRofex.get_all_instruments() or {}).get("instruments") or []
 
     symbols = set()
@@ -129,7 +154,7 @@ def fetch_merv_instruments_symbols():
         symbols.add(sym)
         tk = extract_ticker(sym)
         by_ticker.setdefault(tk, []).append(sym)
-    print(f"[instr] MERV symbols disponibles: {len(symbols)}")
+    vlog(f"[instr] MERV symbols disponibles: {len(symbols)}")
     return symbols, by_ticker
 
 # ========= Supabase upsert =========
@@ -157,6 +182,7 @@ _stop_event = threading.Event()
 _latest_by_symbol = {}               # full_symbol -> {ticker,last_ars,bid,ask,closing_price,seen_ts}
 _ref_prices = {"AL30": None, "AL30D": None}
 _last_push_ts = {}                   # por ticker limpio
+_last_printed_snapshot = {}          # por ticker: última tupla impresa
 
 # ========= WS Handlers =========
 def market_data_handler(message: dict):
@@ -194,8 +220,8 @@ def market_data_handler(message: dict):
         if ticker in _ref_prices:
             _ref_prices[ticker] = float(last)
 
-def error_handler(msg):       print("WS Error:", msg)
-def exception_handler(e):     print("WS Exception:", getattr(e, "msg", str(e)))
+def error_handler(msg):       print(f"[{_now_local_str()}] WS Error:", msg)
+def exception_handler(e):     print(f"[{_now_local_str()}] WS Exception:", getattr(e, "msg", str(e)))
 
 # ========= Push loop =========
 def compute_fx_and_usd(price_ars):
@@ -205,6 +231,14 @@ def compute_fx_and_usd(price_ars):
         fx = al30d / al30
         return fx, (price_ars * fx)
     return None, None
+
+def _diff(a, b, tol=1e-9):
+    if a is None or b is None:
+        return (a is None) != (b is None)
+    try:
+        return abs(float(a) - float(b)) > tol
+    except Exception:
+        return a != b
 
 def pusher_loop():
     while not _stop_event.is_set():
@@ -239,8 +273,30 @@ def pusher_loop():
                         change=chg
                     )
                     _last_push_ts[tk] = now
-                    chg_txt = f"{chg:.2%}" if chg is not None else "N/A"
-                    print(f"[PUSH] {tk:8s} ARS={ars:,.6f}  CL={clp}  CHG={chg_txt}  FX={fx_mep}  USD={usd}")
+
+                    # ----------- PRINT SÓLO SI SE ACTUALIZÓ RESPECTO DEL ÚLTIMO PRINT -----------
+                    snap = (
+                        round(ars, 8) if ars is not None else None,
+                        round(bid, 8) if bid is not None else None,
+                        round(ask, 8) if ask is not None else None,
+                        round(fx_mep, 8) if fx_mep is not None else None,
+                        round(usd, 8) if usd is not None else None,
+                        round(chg, 8) if chg is not None else None,
+                        round(clp, 8) if isinstance(clp, (int, float)) else clp
+                    )
+                    prev = _last_printed_snapshot.get(tk)
+                    if (
+                        prev is None or
+                        any(_diff(snap[i], prev[i]) for i in range(len(snap)))
+                    ):
+                        chg_txt = f"{chg:.2%}" if chg is not None else "N/A"
+                        fx_txt  = f"{fx_mep:.6f}" if fx_mep is not None else "N/A"
+                        usd_txt = f"{usd:.6f}" if usd is not None else "N/A"
+                        clp_txt = f"{clp:.6f}" if isinstance(clp, (int,float)) else "N/A"
+                        print(f"[{_now_local_str()}] UPDATED {tk:8s} ARS={ars:,.6f}  CL={clp_txt}  CHG={chg_txt}  FX={fx_txt}  USD={usd_txt}")
+                        _last_printed_snapshot[tk] = snap
+                    # ---------------------------------------------------------------------------
+
         _stop_event.wait(1.0)
 
 # ========= Main =========
@@ -248,69 +304,77 @@ if __name__ == "__main__":
     running = True
     def stop_connection(sig, frame):
         global running
-        print("\nDeteniendo...")
+        print(f"\n[{_now_local_str()}] Deteniendo...")
         running = False
         _stop_event.set()
     signal.signal(signal.SIGINT, stop_connection)
 
-    # 1) ECO
-    init_connection_eco()
-
-    # 2) Tickers deseados desde ALL_TICKERS (+ segmento preferido si existe)
-    wanted, seg_pref = get_all_tickers_from_all_tickers()
-
-    # 3) Símbolos canónicos MERV (REST) y mapeo por ticker
-    symbols_set, by_ticker = fetch_merv_instruments_symbols()
-
-    # 4) Resolver símbolo por ticker (preferimos seg_pref[ticker] o DEFAULT_SEG)
-    symbols_ws = []
-    not_found = []
-    for tk in wanted:
-        candidates = by_ticker.get(tk, [])
-        if not candidates:
-            not_found.append(tk); continue
-        target_seg = (seg_pref.get(tk) or DEFAULT_SEG).strip()
-        pick = None
-        for c in candidates:
-            if c.endswith(f" - {target_seg}"):
-                pick = c; break
-        if pick is None:
-            for c in candidates:
-                if c.endswith(f" - {DEFAULT_SEG}"):
-                    pick = c; break
-        if pick is None:
-            pick = candidates[0]
-        symbols_ws.append(pick)
-
-    print(f"[ws] segmento default = {DEFAULT_SEG}")
-    print(f"[ws] suscribiendo {len(symbols_ws)} símbolos (por all_tickers):")
-    for s in symbols_ws[:25]:
-        print("  -", s)
-    if len(symbols_ws) > 25:
-        print("  ...", len(symbols_ws)-25, "más")
-    if not_found:
-        print("[warn] tickers sin símbolo MERV:", not_found[:20], ("..." if len(not_found)>20 else ""))
-
-    # 5) WS con Closing Price incluido
-    entries = [pyRofex.MarketDataEntry.LAST,
-               pyRofex.MarketDataEntry.BIDS,
-               pyRofex.MarketDataEntry.OFFERS,
-               pyRofex.MarketDataEntry.CLOSING_PRICE]
-    pyRofex.init_websocket_connection(
-        market_data_handler=market_data_handler,
-        error_handler=error_handler,
-        exception_handler=exception_handler
-    )
-    pyRofex.market_data_subscription(tickers=symbols_ws, entries=entries)
-
-    # 6) loop de push
-    t = threading.Thread(target=pusher_loop, daemon=True)
-    t.start()
     try:
-        while running:
-            time.sleep(0.5)
-    finally:
-        _stop_event.set()
-        t.join(timeout=2.0)
-        pyRofex.close_websocket_connection()
-        print("WS cerrado.")
+        # 1) ECO
+        init_connection_eco()
+
+        # 2) Tickers deseados desde ALL_TICKERS (+ segmento preferido si existe)
+        wanted, seg_pref = get_all_tickers_from_all_tickers()
+
+        # 3) Símbolos canónicos MERV (REST) y mapeo por ticker
+        symbols_set, by_ticker = fetch_merv_instruments_symbols()
+
+        # 4) Resolver símbolo por ticker (preferimos seg_pref[ticker] o DEFAULT_SEG)
+        symbols_ws = []
+        not_found = []
+        for tk in wanted:
+            candidates = by_ticker.get(tk, [])
+            if not candidates:
+                not_found.append(tk); continue
+            target_seg = (seg_pref.get(tk) or DEFAULT_SEG).strip()
+            pick = None
+            for c in candidates:
+                if c.endswith(f" - {target_seg}"):
+                    pick = c; break
+            if pick is None:
+                for c in candidates:
+                    if c.endswith(f" - {DEFAULT_SEG}"):
+                        pick = c; break
+            if pick is None:
+                pick = candidates[0]
+            symbols_ws.append(pick)
+
+        vlog(f"[ws] segmento default = {DEFAULT_SEG}")
+        if VERBOSE:
+            print(f"[{_now_local_str()}] [ws] suscribiendo {len(symbols_ws)} símbolos (por all_tickers)")
+            for s in symbols_ws[:25]:
+                print("  -", s)
+            if len(symbols_ws) > 25:
+                print("  ...", len(symbols_ws)-25, "más")
+            if not_found:
+                print(f"[{_now_local_str()}] [warn] tickers sin símbolo MERV:", not_found[:20], ("..." if len(not_found)>20 else ""))
+
+        # 5) WS con Closing Price incluido
+        entries = [pyRofex.MarketDataEntry.LAST,
+                   pyRofex.MarketDataEntry.BIDS,
+                   pyRofex.MarketDataEntry.OFFERS,
+                   pyRofex.MarketDataEntry.CLOSING_PRICE]
+        pyRofex.init_websocket_connection(
+            market_data_handler=market_data_handler,
+            error_handler=error_handler,
+            exception_handler=exception_handler
+        )
+        pyRofex.market_data_subscription(tickers=symbols_ws, entries=entries)
+
+        # 6) loop de push
+        t = threading.Thread(target=pusher_loop, daemon=True)
+        t.start()
+        try:
+            while running:
+                time.sleep(0.5)
+        finally:
+            _stop_event.set()
+            t.join(timeout=2.0)
+            pyRofex.close_websocket_connection()
+            print(f"[{_now_local_str()}] WS cerrado.")
+    except Exception as e:
+        print(f"[{_now_local_str()}] [ERROR]", e)
+        try:
+            pyRofex.close_websocket_connection()
+        except Exception:
+            pass
