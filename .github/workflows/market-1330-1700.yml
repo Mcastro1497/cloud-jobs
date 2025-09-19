@@ -22,11 +22,11 @@ jobs:
       ECO_PASS:     ${{ secrets.ECO_PASS }}
       ECO_ACCT:     ${{ secrets.ECO_ACCT }}
       DEFAULT_SEGMENT: 24hs
-      PUSH_INTERVAL_SEC: "10"
+      PUSH_INTERVAL_SEC: "30"
       PRINT_UPDATES: "1"
       VERBOSE: "1"
       # cuánto dejar correr Precios_v4 antes de cortarlo
-      PRICES_TTL_SEC: "30"
+      PRICES_TTL_SEC: "10"
 
     steps:
       - uses: actions/checkout@v4
