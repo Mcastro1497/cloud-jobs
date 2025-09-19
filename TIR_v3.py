@@ -6,6 +6,8 @@ Calcula TIR (XIRR) y Duration de Macaulay cada INTERVAL_SEC.
 - HD: usa flujos de public.soberanos_flows y precio last_prices.last (ya en USD).
 - Filtra flujos por fecha_pago > (T+1 hábil, fin de día LOCAL), ignorando moneda_pago.
 - Upsert en last_prices: ytm (decimal anual), duration_y (años), ts.
+
+Salida: SOLO imprime líneas cuando actualiza un ticker, con timestamp local.
 """
 
 import os, time
@@ -17,7 +19,7 @@ import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
 
-# ===== Zona horaria =====
+# ===== Zona horaria y logging =====
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -33,6 +35,13 @@ def _get_local_tz():
     return timezone.utc
 
 LOCAL_TZ = _get_local_tz()
+def _now_local_str() -> str:
+    return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+VERBOSE = (os.getenv("VERBOSE", "0").strip() == "1")
+def vlog(*args, **kwargs):
+    if VERBOSE:
+        print(f"[{_now_local_str()}]", *args, **kwargs)
 
 # ===== Config =====
 load_dotenv()
@@ -62,7 +71,7 @@ def load_holidays_dates_from_supabase() -> Set[dtdate]:
             if pd.notna(dt):
                 hols.add(dt.date())
     except Exception as e:
-        print("[WARN] No se pudieron leer feriados de Supabase:", e)
+        vlog("[WARN] No se pudieron leer feriados de Supabase:", e)
     return hols
 
 def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Timestamp:
@@ -74,13 +83,13 @@ def next_business_day(local_date: pd.Timestamp, holidays: Set[dtdate]) -> pd.Tim
 def t1_eod_cutoff_utc(now_utc: datetime, holidays: Set[dtdate]) -> Tuple[datetime, pd.Timestamp, datetime]:
     today_local = now_utc.astimezone(LOCAL_TZ).date()
     t1_local_date = next_business_day(pd.Timestamp(today_local), holidays).date()
-    # Cambiar de 23:59:59 a 00:00:00 para alinear con Excel/Google
+    # Valuación 00:00:00 del T+1 local
     t1_local_start = datetime.combine(t1_local_date, dtime(0, 0, 0, 0), tzinfo=LOCAL_TZ)
     return t1_local_start.astimezone(timezone.utc), pd.Timestamp(t1_local_date), t1_local_start.astimezone(timezone.utc)
 
 # ===== Finanzas =====
 def _to_dt_aware_utc(x):
-    if isinstance(x, tuple):  # tolera valores tipo (dt,)
+    if isinstance(x, tuple):
         x = x[0]
     if isinstance(x, pd.Timestamp):
         x = x.to_pydatetime()
@@ -88,7 +97,6 @@ def _to_dt_aware_utc(x):
         if x.tzinfo is None:
             x = x.replace(tzinfo=timezone.utc)
         return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    # último recurso: parsear strings/otros
     x = pd.to_datetime(x, utc=True).to_pydatetime()
     return x.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -195,7 +203,6 @@ def _normalize_flows_df(df: pd.DataFrame) -> pd.DataFrame:
                     .replace({"": "0", "None": "0"})
                     .astype(float)
     )
-    # NO filtramos por moneda_pago
     if "moneda_pago" in df.columns:
         df["moneda_pago"] = df["moneda_pago"].astype(str).str.strip()
     return df
@@ -277,12 +284,13 @@ def once() -> int:
     # 1) Hábiles y cutoff
     holidays = load_holidays_dates_from_supabase()
     cutoff_utc, t1_local_date, valuation_utc = t1_eod_cutoff_utc(now_utc, holidays)
-    print(f"[INFO] Cutoff (T+1 hábil, fin de día local) = {cutoff_utc.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    vlog(f"Cutoff (T+1 hábil) = {cutoff_utc.astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     # 2) Tickers + tipo
     base_tickers, type_map = load_all_tickers_with_type()
     if not base_tickers:
-        print("[WARN] all_tickers vacío o no accesible."); return 0
+        vlog("all_tickers vacío o no accesible.")
+        return 0
 
     on_tickers = [t for t in base_tickers if type_map.get(t) in {"ON","UNKNOWN"}]
     hd_tickers = [t for t in base_tickers if type_map.get(t) == "HD"]
@@ -296,36 +304,24 @@ def once() -> int:
 
     # 5) Unimos flujos
     flows = pd.concat([flows_on, flows_hd], ignore_index=True) if (not flows_on.empty or not flows_hd.empty) else pd.DataFrame(columns=["ticker","fecha_pago","total","moneda_pago"])
-
-    print(f"[INFO] all_tickers={len(base_tickers)} | flows_on={len(flows_on)} filas/{flows_on['ticker'].nunique() if not flows_on.empty else 0} tickers | flows_hd={len(flows_hd)} filas/{flows_hd['ticker'].nunique() if not flows_hd.empty else 0} tickers | total_flows={len(flows)}")
-
-    if flows.empty:
-        print("[WARN] sin flujos futuros en ninguna tabla."); return 0
-    if not (price_usd_map or last_map):
-        print("[WARN] last_prices vacío (sin price_usd/last)."); return 0
+    if flows.empty or not (price_usd_map or last_map):
+        return 0
 
     flows_tickers = set(flows["ticker"].unique())
-    base_set      = set(base_tickers)
-    candidates    = sorted(base_set & flows_tickers)
-
-    print(f"[INFO] candidatos (con flujos): {len(candidates)}")
-    if not candidates: return 0
+    candidates    = sorted(set(base_tickers) & flows_tickers)
+    if not candidates:
+        return 0
 
     updated = 0
-    issues = []
-    skipped_no_price = []
-
     for tk in candidates:
         instr_type = type_map.get(tk, "UNKNOWN")
-        # Precio según tipo (misma moneda que flujos: USD)
+        # Precio según tipo (USD)
         if instr_type == "HD":
-            price = last_map.get(tk)
-            src = "last(USD)"
+            price = last_map.get(tk); src = "last(USD)"
         else:
-            price = price_usd_map.get(tk)
-            src = "price_usd"
+            price = price_usd_map.get(tk); src = "price_usd"
         if price is None or price <= 0:
-            skipped_no_price.append((tk, instr_type, src)); continue
+            continue
 
         g = flows.loc[flows["ticker"] == tk, ["fecha_pago","total"]].copy()
         g = (g.groupby("fecha_pago", as_index=False, sort=True)
@@ -337,15 +333,15 @@ def once() -> int:
         for _, row in g.iterrows():
             dtp = row["fecha_pago"].to_pydatetime()
             amt = float(row["total"])
-            if amt != 0.0: cf_series.append((dtp, amt))
-        if len(cf_series) < 2: continue
+            if amt != 0.0:
+                cf_series.append((dtp, amt))
+        if len(cf_series) < 2:
+            continue
 
         r = xirr_excel_style(cf_series, guess=0.10)
         if r is None or not isfinite(r):
-            issues.append((tk, price, src, sum(a for _, a in cf_series[1:]),
-                           [(d.strftime('%Y-%m-%d'), a) for d, a in cf_series[:6]]))
             if DEBUG_TICKER and tk == DEBUG_TICKER:
-                print(f"[DEBUG] {tk} sin raíz | {src}={price:.6f} | cf_sum={sum(a for _, a in cf_series[1:]):.6f}")
+                vlog(f"[DEBUG] {tk} sin raíz | {src}={price:.6f}")
             continue
 
         # Duration (Macaulay) con t0 = valuation_utc
@@ -360,29 +356,18 @@ def once() -> int:
         upsert_metrics(tk, float(r), None if duration_y is None else float(duration_y))
         updated += 1
 
-        if DEBUG_TICKER and tk == DEBUG_TICKER:
-            print(f"[DEBUG] {tk} ({instr_type}) {src}={price:,.6f}  XIRR={r:.6%}  Duration={duration_y}")
-        else:
-            print(f"[OK] {tk:8s} ({instr_type}) {src}={price:,.6f}  XIRR={r:.6%}  duration_y={None if duration_y is None else round(duration_y,4)}")
-
-    if skipped_no_price:
-        sample = ", ".join([f"{tk}({t}:{src})" for tk,t,src in skipped_no_price[:10]])
-        print(f"[INFO] saltados por falta de precio ({len(skipped_no_price)}): {sample}")
-
-    if issues:
-        print("[INFO] casos sin raíz/convergencia (muestra máx 5):")
-        for tk, p, src, s, c in issues[:5]:
-            print(f"  - {tk}: {src}={p:.6f} sum_cf={s:.6f} cfs(muestra)={c}")
+        # === ÚNICO PRINT por ticker actualizado ===
+        dur_txt = "None" if duration_y is None else f"{duration_y:.4f}"
+        print(f"[{_now_local_str()}] UPDATED {tk:8s} ({instr_type})  XIRR={r:.6%}  duration_y={dur_txt}")
 
     return updated
 
 def main():
     while True:
         try:
-            n = once()
-            print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Tickers actualizados: {n}")
+            _ = once()   # ya imprime solo cuando actualiza
         except Exception as e:
-            print("[ERROR]", e)
+            print(f"[{_now_local_str()}] [ERROR]", e)
         time.sleep(INTERVAL_SEC)
 
 if __name__ == "__main__":
