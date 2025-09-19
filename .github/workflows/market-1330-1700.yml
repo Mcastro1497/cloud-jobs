@@ -26,7 +26,7 @@ jobs:
       PRINT_UPDATES: "0"
       VERBOSE: "0"
       # cuánto dejar correr Precios_v4 antes de cortarlo
-      PRICES_TTL_SEC: "10"
+      PRICES_TTL_SEC: "30"
 
     steps:
       - uses: actions/checkout@v4
