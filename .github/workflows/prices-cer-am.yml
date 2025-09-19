@@ -1,19 +1,18 @@
-name: Prices → CER+TIR (AM, 10:30–13:30 AR)
+name: "Prices -> CER+TIR (AM & PM)"
 
 on:
   schedule:
-    - cron: "30 13 * * *"   # UTC (AR = UTC-3)
+    - cron: "30 13 * * *"   # 10:30 AR (UTC-3)
+    - cron: "30 16 * * *"   # 13:30 AR (UTC-3)
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
-concurrency:
-  group: prices-cer-am
-  cancel-in-progress: false
-
 jobs:
-  run:
+  am:
+    # Solo corre en el cron de las 13:30 UTC o si se dispara manualmente
+    if: github.event.schedule == '30 13 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 190   # 3h + margen
     env:
@@ -27,40 +26,73 @@ jobs:
       PUSH_INTERVAL_SEC: "10"
       PRINT_UPDATES: "0"
       VERBOSE: "0"
-      PRICES_TTL_SEC: "8"
-
+      PRICES_TTL_SEC: "8"   # segundos que dejamos correr Precios_v4.py antes de cortarlo
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-
       - name: Install deps
         run: pip install -r requirements.txt
-
-      - name: Loop min a min (3 horas)
+      - name: Loop 1/min (AM 10:30-13:30 AR)
         shell: bash
         run: |
           set -euo pipefail
           TOTAL_MINUTES=180
           PRICES_TTL="${PRICES_TTL_SEC:-8}s"
-
           for ((i=1; i<=TOTAL_MINUTES; i++)); do
             LOOP_START=$(date +%s)
             echo "[AM][$(date -u '+%F %T UTC')] cycle=$i"
-
-            # 1) Precios: correr por TTL y terminar (coreutils 'timeout')
+            # 1) Precios por TTL (timeout devuelve 124 -> no fallar el job)
             timeout -k 5s "$PRICES_TTL" python Precios_v4.py || true
+            # 2) CER (once())
+            python -c "import runpy; ns=runpy.run_path('Cer_v2.py'); f=ns.get('once'); print('[RUN] Cer_v2 once()->', int(f() if callable(f) else 0))"
+            # 3) TIR (once())
+            python -c "import runpy; ns=runpy.run_path('TIR_v3.py'); f=ns.get('once'); print('[RUN] TIR_v3 once()->', int(f() if callable(f) else 0))"
+            # completar 60s
+            ELAPSED=$(( $(date +%s) - LOOP_START ))
+            REM=$(( 60 - ELAPSED ))
+            if [ $REM -gt 0 ]; then sleep $REM; fi
+          done
 
-            # 2) CER (ejecutar once())
-            python -c "import runpy,sys;ns=runpy.run_path('Cer_v2.py');f=ns.get('once');print('[RUN] Cer_v2 once()->', int(f() if callable(f) else 0))"
-
-            # 3) TIR (ejecutar once())
-            python -c "import runpy,sys;ns=runpy.run_path('TIR_v3.py');f=ns.get('once');print('[RUN] TIR_v3 once()->', int(f() if callable(f) else 0))"
-
-            # Completar el minuto
+  pm:
+    # Solo corre en el cron de las 16:30 UTC o si se dispara manualmente
+    if: github.event.schedule == '30 16 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 250   # 4h + margen
+    env:
+      LOCAL_TZ: America/Argentina/Cordoba
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
+      ECO_USER:     ${{ secrets.ECO_USER }}
+      ECO_PASS:     ${{ secrets.ECO_PASS }}
+      ECO_ACCT:     ${{ secrets.ECO_ACCT }}
+      DEFAULT_SEGMENT: 24hs
+      PUSH_INTERVAL_SEC: "10"
+      PRINT_UPDATES: "0"
+      VERBOSE: "0"
+      PRICES_TTL_SEC: "8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Loop 1/min (PM 13:30-17:30 AR)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOTAL_MINUTES=240
+          PRICES_TTL="${PRICES_TTL_SEC:-8}s"
+          for ((i=1; i<=TOTAL_MINUTES; i++)); do
+            LOOP_START=$(date +%s)
+            echo "[PM][$(date -u '+%F %T UTC')] cycle=$i"
+            timeout -k 5s "$PRICES_TTL" python Precios_v4.py || true
+            python -c "import runpy; ns=runpy.run_path('Cer_v2.py'); f=ns.get('once'); print('[RUN] Cer_v2 once()->', int(f() if callable(f) else 0))"
+            python -c "import runpy; ns=runpy.run_path('TIR_v3.py'); f=ns.get('once'); print('[RUN] TIR_v3 once()->', int(f() if callable(f) else 0))"
             ELAPSED=$(( $(date +%s) - LOOP_START ))
             REM=$(( 60 - ELAPSED ))
             if [ $REM -gt 0 ]; then sleep $REM; fi
