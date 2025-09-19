@@ -2,8 +2,7 @@ name: Prices → CER+TIR (PM, 13:30–17:30 AR)
 
 on:
   schedule:
-    # 13:30 AR = 16:30 UTC
-    - cron: "30 16 * * *"
+    - cron: "30 16 * * *"   # UTC (AR = UTC-3)
   workflow_dispatch: {}
 
 permissions:
@@ -39,36 +38,23 @@ jobs:
           cache: "pip"
 
       - name: Install deps
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Loop min a min (4 horas)
         shell: bash
         run: |
           set -euo pipefail
-          TOTAL_MINUTES=240 # 4h
-          PRICES_TTL="${PRICES_TTL_SEC:-8}"
+          TOTAL_MINUTES=240
+          PRICES_TTL="${PRICES_TTL_SEC:-8}s"
+
           for ((i=1; i<=TOTAL_MINUTES; i++)); do
             LOOP_START=$(date +%s)
             echo "[PM][$(date -u '+%F %T UTC')] cycle=$i"
-            python Precios_v4.py & PR_PID=$!
-            sleep "$PRICES_TTL" || true
-            kill $PR_PID 2>/dev/null || true
-            python - <<'PY'
-import importlib.util, sys
-def run_once(path):
-    spec = importlib.util.spec_from_file_location("modx", path)
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    fn = getattr(mod, "once", None)
-    if callable(fn):
-        n = fn()
-        print(f"[RUN] {path} once() -> {n}")
-    else:
-        print(f"[WARN] {path} no define once()")
-run_once("Cer_v2.py")
-run_once("TIR_v3.py")
-PY
+
+            timeout -k 5s "$PRICES_TTL" python Precios_v4.py || true
+            python -c "import runpy,sys;ns=runpy.run_path('Cer_v2.py');f=ns.get('once');print('[RUN] Cer_v2 once()->', int(f() if callable(f) else 0))"
+            python -c "import runpy,sys;ns=runpy.run_path('TIR_v3.py');f=ns.get('once');print('[RUN] TIR_v3 once()->', int(f() if callable(f) else 0))"
+
             ELAPSED=$(( $(date +%s) - LOOP_START ))
             REM=$(( 60 - ELAPSED ))
             if [ $REM -gt 0 ]; then sleep $REM; fi
