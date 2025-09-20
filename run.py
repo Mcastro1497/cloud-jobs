@@ -20,7 +20,7 @@ import os, time, signal, subprocess, sys
 from datetime import datetime, timezone
 
 # ===== Config =====
-PRICES_SCRIPT       = os.getenv("PRICES_SCRIPT", "ws_ingestor_last_prices_usd.py")
+PRICES_SCRIPT       = os.getenv("PRICES_SCRIPT", "Precios.py")
 PRICES_RUN_SECONDS  = int(os.getenv("PRICES_RUN_SECONDS", "25"))
 CYCLE_INTERVAL_SEC  = int(os.getenv("CYCLE_INTERVAL_SEC", "120"))
 STATUS_INTERVAL_SEC = int(os.getenv("STATUS_INTERVAL_SEC", "60"))
@@ -38,8 +38,8 @@ def _import_module_from_path(path, module_name):
     spec.loader.exec_module(mod)
     return mod
 
-CER_PATH = os.getenv("CER_PATH", "Cer_v3.py")
-TIR_PATH = os.getenv("TIR_PATH", "TIR_v4.py")
+CER_PATH = os.getenv("CER_PATH", "CER.py")
+TIR_PATH = os.getenv("TIR_PATH", "ON.py")
 
 cer_mod = _import_module_from_path(CER_PATH, "cer_mod")
 tir_mod = _import_module_from_path(TIR_PATH, "tir_mod")
