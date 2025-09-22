@@ -37,7 +37,7 @@ jobs:
 
       # ---- Secrets / config ----
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
       ECO_USER:     ${{ secrets.ECO_USER }}
       ECO_PASS:     ${{ secrets.ECO_PASS }}
       ECO_ACCT:     ${{ secrets.ECO_ACCT }}
