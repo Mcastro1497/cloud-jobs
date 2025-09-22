@@ -16,7 +16,7 @@ jobs:
       - id: chk
         shell: bash
         run: |
-          dow=$(date +%u)            # 1=Mon ... 7=Sun, usando TZ=ART
+          dow=$(date +%u)            # 1=Mon ... 7=Sun (en ART por TZ)
           if [ "$dow" -ge 6 ]; then  # 6=Sat, 7=Sun
             echo "run=false" >> $GITHUB_OUTPUT
             echo "Fin de semana (ART) — se salta ejecución manual."
@@ -31,18 +31,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
+      # Zona horaria para el runner y para tus scripts Python
       TZ: America/Argentina/Cordoba
       LOCAL_TZ: America/Argentina/Cordoba
+
+      # ---- Secrets / config ----
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
       ECO_USER:     ${{ secrets.ECO_USER }}
       ECO_PASS:     ${{ secrets.ECO_PASS }}
       ECO_ACCT:     ${{ secrets.ECO_ACCT }}
+
+      # ---- Parámetros de tus scripts ----
       DEFAULT_SEGMENT: "24hs"
-      PRICES_SCRIPT: "ws_ingestor_last_prices_usd.py"
-      CER_PATH: "Cer_v3.py"
-      TIR_PATH: "TIR_v4.py"
+      PRICES_SCRIPT: "Precios.py"    # <--- en tu repo es Precios.py
+      CER_PATH: "CER.py"             # <--- en tu repo es CER.py
+      TIR_PATH: "ON.py"              # <--- en tu repo es ON.py
       PRICES_RUN_SECONDS: "30"
+      DELAY_AFTER_PRICES_SEC: "15"   # espera extra después de precios
       CYCLE_INTERVAL_SEC: "120"
       STATUS_INTERVAL_SEC: "60"
     steps:
@@ -51,4 +57,5 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: python run_all_prices_then_metrics.py
+      # Ejecuta tu orquestador real (en tu repo está como run.py)
+      - run: python run.py
