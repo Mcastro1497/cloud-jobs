@@ -1,0 +1,54 @@
+name: Runner Unico
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions usa UTC. 13-20 UTC ≈ 10-17 ART. Lunes(1) a Viernes(5).
+    - cron: "*/2 13-20 * * 1-5"
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    env:
+      TZ: America/Argentina/Cordoba
+    outputs:
+      run: ${{ steps.chk.outputs.run }}
+    steps:
+      - id: chk
+        shell: bash
+        run: |
+          dow=$(date +%u)            # 1=Mon ... 7=Sun, usando TZ=ART
+          if [ "$dow" -ge 6 ]; then  # 6=Sat, 7=Sun
+            echo "run=false" >> $GITHUB_OUTPUT
+            echo "Fin de semana (ART) — se salta ejecución manual."
+          else
+            echo "run=true" >> $GITHUB_OUTPUT
+            echo "Día hábil (ART) — se ejecuta."
+          fi
+
+  run:
+    needs: guard
+    if: needs.guard.outputs.run == 'true' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TZ: America/Argentina/Cordoba
+      LOCAL_TZ: America/Argentina/Cordoba
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+      ECO_USER:     ${{ secrets.ECO_USER }}
+      ECO_PASS:     ${{ secrets.ECO_PASS }}
+      ECO_ACCT:     ${{ secrets.ECO_ACCT }}
+      DEFAULT_SEGMENT: "24hs"
+      PRICES_SCRIPT: "ws_ingestor_last_prices_usd.py"
+      CER_PATH: "Cer_v3.py"
+      TIR_PATH: "TIR_v4.py"
+      PRICES_RUN_SECONDS: "30"
+      CYCLE_INTERVAL_SEC: "120"
+      STATUS_INTERVAL_SEC: "60"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python run_all_prices_then_metrics.py
