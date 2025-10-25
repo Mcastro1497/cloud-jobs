@@ -33,7 +33,7 @@ jobs:
           HOUR_MIN=$(TZ=America/Argentina/Buenos_Aires date +%H%M)
           echo "Hora local AR: $(TZ=America/Argentina/Buenos_Aires date)"
 
-          if [[ "$HOUR_MIN" -ge "1100" && "$HOUR_MIN" -lt "1730" ]]; then
+          if [[ "$HOUR_MIN" -ge "1030" && "$HOUR_MIN" -lt "1700" ]]; then
             echo "open=true" >> "$GITHUB_OUTPUT"
             echo "Mercado ABIERTO → ejecuto run.py"
           else
