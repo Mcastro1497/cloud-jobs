@@ -1,61 +1,38 @@
 name: Runner Unico
+
 on:
-  workflow_dispatch:
+  # Solo cron y lanzamiento manual. (Quitamos push para evitar bucles)
   schedule:
-    # GitHub Actions usa UTC. 13-20 UTC ≈ 10-17 ART. Lunes(1) a Viernes(5).
-    - cron: "*/2 13-20 * * 1-5"
+    - cron: "*/30 * * * *"   # cada 30 minutos (ajustá si querés)
+  workflow_dispatch: {}
+
+# Garantiza que haya una sola ejecución a la vez
+concurrency:
+  group: runner-unico
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  guard:
-    runs-on: ubuntu-latest
-    env:
-      TZ: America/Argentina/Cordoba
-    outputs:
-      run: ${{ steps.chk.outputs.run }}
-    steps:
-      - id: chk
-        shell: bash
-        run: |
-          dow=$(date +%u)            # 1=Mon ... 7=Sun (en ART por TZ)
-          if [ "$dow" -ge 6 ]; then  # 6=Sat, 7=Sun
-            echo "run=false" >> $GITHUB_OUTPUT
-            echo "Fin de semana (ART) — se salta ejecución manual."
-          else
-            echo "run=true" >> $GITHUB_OUTPUT
-            echo "Día hábil (ART) — se ejecuta."
-          fi
-
   run:
-    needs: guard
-    if: needs.guard.outputs.run == 'true' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      # Zona horaria para el runner y para tus scripts Python
-      TZ: America/Argentina/Cordoba
-      LOCAL_TZ: America/Argentina/Cordoba
+    # Evita re-ejecuciones disparadas por el propio bot
+    if: ${{ github.actor != 'github-actions[bot]' }}
 
-      # ---- Secrets / config ----
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
-      ECO_USER:     ${{ secrets.ECO_USER }}
-      ECO_PASS:     ${{ secrets.ECO_PASS }}
-      ECO_ACCT:     ${{ secrets.ECO_ACCT }}
-
-      # ---- Parámetros de tus scripts ----
-      DEFAULT_SEGMENT: "24hs"
-      PRICES_SCRIPT: "Precios.py"    # <--- en tu repo es Precios.py
-      CER_PATH: "CER.py"             # <--- en tu repo es CER.py
-      TIR_PATH: "ON.py"              # <--- en tu repo es ON.py
-      PRICES_RUN_SECONDS: "30"
-      DELAY_AFTER_PRICES_SEC: "15"   # espera extra después de precios
-      CYCLE_INTERVAL_SEC: "120"
-      STATUS_INTERVAL_SEC: "60"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r requirements.txt
-      # Ejecuta tu orquestador real (en tu repo está como run.py)
-      - run: python run.py
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ⬇️ Aca van TUS pasos reales (lo que hacen tus jobs).
+      # Ejemplos:
+      # - name: Configurar Node
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: '20'
+      #
+      # - name: Ejecutar script
+      #   run: |
+      #     node scripts/tu_tarea.js
+
+      # ⚠️ Si NO necesitás commitear/pushear cambios al repo, NO agregues pasos de git.
